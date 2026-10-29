@@ -1,0 +1,8 @@
+# Ejecutable de la tarea
+torneo
+*.out
+*.o
+
+# Editor y SO
+.vscode/
+.DS_Store
