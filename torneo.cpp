@@ -22,7 +22,7 @@ struct Configuracion {
     int min_delay_ms = 50;
     int max_delay_ms = 300;
     unsigned int seed = 0;
-    int pos_inicial_puma = 0; // El Puma empieza en el nodo 0
+    int pos_inicial_puma = 0; // El Puma empieza en el nodo 0 (T)
     vector<int> pos_inicial_perros = {15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26};
 };
 
@@ -101,11 +101,11 @@ struct TableroKomikan {
         }
 
         // 3. Saltos rectos dentro del Trono y hacia la grilla 5x5
-        agregar_linea_salto(0, 1, 3);
-        agregar_linea_salto(0, 2, 7);
-        agregar_linea_salto(0, 5, 10);
-        agregar_linea_salto(1, 4, 9);
-        agregar_linea_salto(2, 6, 11);
+        agregar_linea_salto(0, 1, 3);  // Diagonal izquierda del trono: 0 <-> 1 <-> 3
+        agregar_linea_salto(0, 2, 7);  // Diagonal derecha del trono: 0 <-> 2 <-> 7
+        agregar_linea_salto(0, 5, 10); // Vertical central desde T: 0 <-> 5 <-> 10
+        agregar_linea_salto(1, 4, 9);  // Vertical desde nodo 1: 1 <-> 4 <-> 9
+        agregar_linea_salto(2, 6, 11); // Vertical desde nodo 2: 2 <-> 6 <-> 11
 
         // 4. Saltos horizontales y verticales dentro de la grilla 5x5
         for (int fila = 0; fila < 5; fila++) {
@@ -128,16 +128,20 @@ struct TableroKomikan {
         return false;
     }
 
+    // Imprime el tablero perfectamente alineado con el diagrama oficial
     void imprimir_tablero() {
         cout << "\n========== MESA " << id_mesa << " | Perros capturados: "
              << perros_capturados << "/6 ==========\n";
         if (!ultimo_evento.empty()) {
             cout << "Evento: " << ultimo_evento << "\n";
         }
-        cout << "                (" << casillas[0] << ") [T:0]\n";
-        cout << "              /  |  \\\n";
-        cout << "        [1](" << casillas[1] << ")---+---(" << casillas[2] << ")[2]\n";
-        cout << "          / |    |    | \\\n";
+        // Centros de las 5 columnas: col0=9, col1=15, col2=21, col3=27, col4=33
+        cout << "                    (" << casillas[0] << ") [T]\n";
+        cout << "                   / | \\\n";
+        cout << "                 /   |   \\\n";
+        cout << "              (" << casillas[1] << ")----+----(" << casillas[2] << ")\n";
+        cout << "             / |     |     | \\\n";
+        cout << "           /   |     |     |   \\\n";
 
         for (int fila = 0; fila < 5; fila++) {
             cout << "        ";
@@ -148,12 +152,12 @@ struct TableroKomikan {
             }
             cout << "\n";
             if (fila < 4) {
-                cout << "         |   |   |   |   |\n";
+                cout << "         |     |     |     |     |\n";
             }
         }
         cout << "====================================================\n";
     }
-};
+}; // <-- ¡Esta es la llave de cierre del struct TableroKomikan que faltaba!
 
 // Argumentos para pasar a cada hilo de Perro
 struct ArgPerro {
@@ -388,7 +392,7 @@ int main(int argc, char* argv[]) {
     cout << "Torneo Komikan Inicializado | N=" << N << " jugadores | M=" << M << " mesas max\n";
     cout << "Delays configurados: [" << cfg.min_delay_ms << " ms - " << cfg.max_delay_ms << " ms]\n";
 
-    // Prueba de la Etapa 2: Ejecutar una partida completa con el Juez, Puma y 12 Perros
+    // Ejecutar una partida completa con el Juez, Puma y 12 Perros
     TableroKomikan mesa_1(1, cfg);
     pthread_t t_juez;
     pthread_create(&t_juez, NULL, hilo_juez, &mesa_1);
