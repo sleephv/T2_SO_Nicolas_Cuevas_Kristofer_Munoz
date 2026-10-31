@@ -3,6 +3,7 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <queue>
 #include <cstdlib>
 #include <ctime>
 #include <pthread.h>
@@ -29,6 +30,9 @@ struct Configuracion {
 // Representa el estado compartido del tablero de 28 casillas de la mesa (Opción A)
 struct TableroKomikan {
     int id_mesa;
+    int id_jugador_puma;
+    int id_jugador_perros;
+
     char casillas[28];               // 'P' para Puma, 'D' para Perro, '.' para vacío
     vector<int> adyacentes[28];      // Movimientos normales de 1 paso
     vector<Salto> saltos_puma[28];   // Saltos de captura de 2 pasos
@@ -43,9 +47,12 @@ struct TableroKomikan {
     Configuracion cfg;
     pthread_mutex_t mutex_tablero;   // Mutex general para proteger el tablero
     pthread_cond_t cond_juez;        // Variable de condición para despertar al Juez
+    pthread_mutex_t* mutex_consola;  // Puntero al mutex de consola del servidor
 
-    TableroKomikan(int id, const Configuracion& config)
-        : id_mesa(id), perros_capturados(0), partida_activa(true), hubo_movimiento(false), cfg(config) {
+    TableroKomikan(int id, int jug_puma, int jug_perros, const Configuracion& config, pthread_mutex_t* m_consola)
+        : id_mesa(id), id_jugador_puma(jug_puma), id_jugador_perros(jug_perros),
+          perros_capturados(0), partida_activa(true), hubo_movimiento(false),
+          cfg(config), mutex_consola(m_consola) {
         pthread_mutex_init(&mutex_tablero, NULL);
         pthread_cond_init(&cond_juez, NULL);
 
@@ -57,14 +64,21 @@ struct TableroKomikan {
 
         // Posicionar al Puma
         pos_puma = cfg.pos_inicial_puma;
-        casillas[pos_puma] = 'P';
+        if (pos_puma >= 0 && pos_puma < 28) {
+            casillas[pos_puma] = 'P';
+        } else {
+            pos_puma = 0;
+            casillas[0] = 'P';
+        }
 
         // Posicionar a los 12 Perros
         for (int i = 0; i < 12; i++) {
-            int pos = cfg.pos_inicial_perros[i];
-            pos_perros[i] = pos;
-            if (pos >= 0 && pos < 28 && pos != pos_puma) {
+            int pos = (i < static_cast<int>(cfg.pos_inicial_perros.size())) ? cfg.pos_inicial_perros[i] : -1;
+            if (pos >= 0 && pos < 28 && pos != pos_puma && casillas[pos] == '.') {
+                pos_perros[i] = pos;
                 casillas[pos] = 'D';
+            } else {
+                pos_perros[i] = -1;
             }
         }
     }
@@ -130,8 +144,11 @@ struct TableroKomikan {
 
     // Imprime el tablero perfectamente alineado con el diagrama oficial
     void imprimir_tablero() {
-        cout << "\n========== MESA " << id_mesa << " | Perros capturados: "
-             << perros_capturados << "/6 ==========\n";
+        if (mutex_consola) pthread_mutex_lock(mutex_consola);
+
+        cout << "\n========== MESA " << id_mesa << " [Puma: Jugador #" << id_jugador_puma
+             << " vs Perros: Jugador #" << id_jugador_perros << "] ==========\n";
+        cout << "Perros capturados: " << perros_capturados << "/6\n";
         if (!ultimo_evento.empty()) {
             cout << "Evento: " << ultimo_evento << "\n";
         }
@@ -156,8 +173,10 @@ struct TableroKomikan {
             }
         }
         cout << "====================================================\n";
+
+        if (mutex_consola) pthread_mutex_unlock(mutex_consola);
     }
-}; // <-- ¡Esta es la llave de cierre del struct TableroKomikan que faltaba!
+};
 
 // Argumentos para pasar a cada hilo de Perro
 struct ArgPerro {
@@ -175,7 +194,7 @@ void dormir_aleatorio(const Configuracion& cfg, unsigned int* seed_hilo) {
 // Hilo del Puma (1 por mesa)
 void* hilo_puma(void* arg) {
     TableroKomikan* mesa = static_cast<TableroKomikan*>(arg);
-    unsigned int seed_local = mesa->cfg.seed ^ 999;
+    unsigned int seed_local = mesa->cfg.seed ^ (999 + mesa->id_mesa * 31);
 
     while (true) {
         dormir_aleatorio(mesa->cfg, &seed_local);
@@ -242,7 +261,7 @@ void* hilo_perro(void* arg) {
     ArgPerro* datos = static_cast<ArgPerro*>(arg);
     int id = datos->id_perro;
     TableroKomikan* mesa = datos->mesa;
-    unsigned int seed_local = mesa->cfg.seed ^ (id + 100);
+    unsigned int seed_local = mesa->cfg.seed ^ ((id + 100) * (mesa->id_mesa + 7));
 
     while (true) {
         dormir_aleatorio(mesa->cfg, &seed_local);
@@ -309,16 +328,20 @@ void* hilo_juez(void* arg) {
 
         // Condición de victoria 1: El Puma capturó 6 o más perros
         if (mesa->perros_capturados >= 6) {
-            cout << "\n>>> [JUEZ MESA " << mesa->id_mesa << "] ¡VICTORIA DEL PUMA! (Capturo "
-                 << mesa->perros_capturados << " perros) <<<\n";
+            if (mesa->mutex_consola) pthread_mutex_lock(mesa->mutex_consola);
+            cout << "\n>>> [JUEZ MESA " << mesa->id_mesa << "] ¡VICTORIA DEL PUMA (Jugador #"
+                 << mesa->id_jugador_puma << ")! (Capturo " << mesa->perros_capturados << " perros) <<<\n";
+            if (mesa->mutex_consola) pthread_mutex_unlock(mesa->mutex_consola);
             mesa->partida_activa = false;
             break;
         }
 
         // Condición de victoria 2: Los Perros acorralaron al Puma
         if (!mesa->puma_tiene_movimientos()) {
-            cout << "\n>>> [JUEZ MESA " << mesa->id_mesa << "] ¡VICTORIA DE LOS PERROS! (Puma acorralado en nodo "
-                 << mesa->pos_puma << ") <<<\n";
+            if (mesa->mutex_consola) pthread_mutex_lock(mesa->mutex_consola);
+            cout << "\n>>> [JUEZ MESA " << mesa->id_mesa << "] ¡VICTORIA DE LOS PERROS (Jugador #"
+                 << mesa->id_jugador_perros << ")! (Puma acorralado en nodo " << mesa->pos_puma << ") <<<\n";
+            if (mesa->mutex_consola) pthread_mutex_unlock(mesa->mutex_consola);
             mesa->partida_activa = false;
             break;
         }
@@ -372,6 +395,168 @@ Configuracion cargar_configuracion(const string& ruta) {
     return cfg;
 }
 
+// ==================== ETAPA 3: SERVIDOR Y EMPAREJAMIENTO ====================
+
+struct ServidorMatchmaker {
+    int total_clientes;
+    int clientes_llegados = 0;
+    int contador_partidas = 0;
+    int jugador_impar_sobrante = -1;    // Guarda el ID del jugador que quedó sin pareja
+
+    queue<int> cola_espera;             // Cola donde llegan los N clientes
+    vector<bool> mesa_libre;            // Controla cuál de las M mesas físicas (1..M) está libre
+    vector<pthread_t> hilos_partidas;   // Guarda los hilos de las partidas para esperar su fin
+
+    pthread_mutex_t mutex_mm;           // Protege la cola de emparejamiento y la lista de mesas
+    pthread_cond_t cond_lobby;          // Permite que el cliente impar espere pasivamente en el lobby
+    pthread_mutex_t mutex_consola;      // Evita que dos mesas mezclen sus dibujos en pantalla
+    sem_t sem_mesas_disponibles;        // Semáforo POSIX inicializado en M
+
+    Configuracion cfg;
+
+    ServidorMatchmaker(int N, int M, const Configuracion& config)
+        : total_clientes(N), mesa_libre(M, true), cfg(config) {
+        pthread_mutex_init(&mutex_mm, NULL);
+        pthread_cond_init(&cond_lobby, NULL);
+        pthread_mutex_init(&mutex_consola, NULL);
+        sem_init(&sem_mesas_disponibles, 0, M); // Límite estricto de M mesas activas
+    }
+
+    ~ServidorMatchmaker() {
+        pthread_mutex_destroy(&mutex_mm);
+        pthread_cond_destroy(&cond_lobby);
+        pthread_mutex_destroy(&mutex_consola);
+        sem_destroy(&sem_mesas_disponibles);
+    }
+};
+
+struct DatosPartida {
+    int num_partida;
+    int id_jugador_puma;
+    int id_jugador_perros;
+    ServidorMatchmaker* servidor;
+};
+
+// Hilo que gestiona el ciclo de vida de una Mesa asignada
+void* ejecutar_mesa_torneo(void* arg) {
+    DatosPartida* datos = static_cast<DatosPartida*>(arg);
+    ServidorMatchmaker* srv = datos->servidor;
+
+    // 1. Espera pasiva en el semáforo si las M mesas están ocupadas
+    sem_wait(&srv->sem_mesas_disponibles);
+
+    // 2. Reclamar el número de mesa física disponible (entre 1 y M)
+    int id_mesa_fisica = -1;
+    pthread_mutex_lock(&srv->mutex_mm);
+    for (size_t i = 0; i < srv->mesa_libre.size(); i++) {
+        if (srv->mesa_libre[i]) {
+            srv->mesa_libre[i] = false;
+            id_mesa_fisica = static_cast<int>(i) + 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&srv->mutex_mm);
+
+    pthread_mutex_lock(&srv->mutex_consola);
+    cout << "\n[MATCHMAKER] >>> Iniciando Partida #" << datos->num_partida
+         << " en MESA " << id_mesa_fisica << " (Jugador #" << datos->id_jugador_puma
+         << " [Puma] vs Jugador #" << datos->id_jugador_perros << " [Perros]) <<<\n";
+    pthread_mutex_unlock(&srv->mutex_consola);
+
+    // 3. Crear el tablero de la mesa y correr el Juez Árbitro
+    TableroKomikan mesa(id_mesa_fisica, datos->id_jugador_puma, datos->id_jugador_perros, srv->cfg, &srv->mutex_consola);
+    hilo_juez(&mesa);
+
+    // 4. Liberar la mesa física y despertar a la siguiente pareja en espera
+    pthread_mutex_lock(&srv->mutex_mm);
+    srv->mesa_libre[id_mesa_fisica - 1] = true;
+    pthread_mutex_unlock(&srv->mutex_mm);
+
+    pthread_mutex_lock(&srv->mutex_consola);
+    cout << "\n[MATCHMAKER] <<< MESA " << id_mesa_fisica
+         << " liberada tras finalizar la Partida #" << datos->num_partida << " >>>\n";
+    pthread_mutex_unlock(&srv->mutex_consola);
+
+    sem_post(&srv->sem_mesas_disponibles); // Libera el cupo en el semáforo
+
+    delete datos;
+    return NULL;
+}
+
+struct ArgCliente {
+    int id_cliente;
+    ServidorMatchmaker* servidor;
+};
+
+// Hilo que representa a cada uno de los N clientes llegando concurrentemente al servidor
+void* hilo_cliente(void* arg) {
+    ArgCliente* cli = static_cast<ArgCliente*>(arg);
+    ServidorMatchmaker* srv = cli->servidor;
+
+    pthread_mutex_lock(&srv->mutex_mm);
+    srv->cola_espera.push(cli->id_cliente);
+    srv->clientes_llegados++;
+
+    pthread_mutex_lock(&srv->mutex_consola);
+    cout << "[SERVIDOR] Llega Cliente #" << cli->id_cliente
+         << " a la sala de espera (" << srv->clientes_llegados << "/" << srv->total_clientes << ").\n";
+    pthread_mutex_unlock(&srv->mutex_consola);
+
+    // Caso 1: Hay 2 jugadores en la fila -> Se emparejan y despiertan al compañero que esperaba
+    if (srv->cola_espera.size() >= 2) {
+        int jug_puma = srv->cola_espera.front();
+        srv->cola_espera.pop();
+        int jug_perros = srv->cola_espera.front();
+        srv->cola_espera.pop();
+
+        srv->contador_partidas++;
+        DatosPartida* nueva_partida = new DatosPartida{
+            srv->contador_partidas,
+            jug_puma,
+            jug_perros,
+            srv
+        };
+
+        pthread_t t_partida;
+        pthread_create(&t_partida, NULL, ejecutar_mesa_torneo, nueva_partida);
+        srv->hilos_partidas.push_back(t_partida);
+
+        pthread_cond_broadcast(&srv->cond_lobby);
+    }
+    // Caso 2: Quedó 1 solo jugador en la cola -> Espera pasivamente hasta que llegue pareja o se acaben los N clientes
+    else {
+        while (!srv->cola_espera.empty() &&
+               srv->cola_espera.front() == cli->id_cliente &&
+               srv->clientes_llegados < srv->total_clientes) {
+            pthread_cond_wait(&srv->cond_lobby, &srv->mutex_mm);
+        }
+
+        // Si ya llegaron los N clientes y este jugador sigue solo en la cola, es el impar sobrante
+        if (!srv->cola_espera.empty() &&
+            srv->cola_espera.front() == cli->id_cliente &&
+            srv->clientes_llegados == srv->total_clientes) {
+            srv->cola_espera.pop();
+            srv->jugador_impar_sobrante = cli->id_cliente;
+
+            pthread_mutex_lock(&srv->mutex_consola);
+            cout << "\n*************************************************************\n";
+            cout << "[MATCHMAKER] AVISO DE JUGADOR IMPAR: El Cliente #" << cli->id_cliente
+                 << " espero en el lobby pero no quedan mas rivales (N=" << srv->total_clientes << ").\n";
+            cout << "*************************************************************\n\n";
+            pthread_mutex_unlock(&srv->mutex_consola);
+        }
+    }
+
+    // Si este hilo fue el último en llegar, despierta a cualquier impar que esté esperando
+    if (srv->clientes_llegados == srv->total_clientes) {
+        pthread_cond_broadcast(&srv->cond_lobby);
+    }
+
+    pthread_mutex_unlock(&srv->mutex_mm);
+    delete cli;
+    return NULL;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 3 || argc > 4) {
         cerr << "Uso: " << argv[0] << " <N_Jugadores> <M_Mesas> [config.txt]\n";
@@ -389,14 +574,43 @@ int main(int argc, char* argv[]) {
 
     Configuracion cfg = cargar_configuracion(ruta_cfg);
 
-    cout << "Torneo Komikan Inicializado | N=" << N << " jugadores | M=" << M << " mesas max\n";
-    cout << "Delays configurados: [" << cfg.min_delay_ms << " ms - " << cfg.max_delay_ms << " ms]\n";
+    cout << "=========================================================\n";
+    cout << " Torneo Komikan Inicializado | N=" << N << " clientes | M=" << M << " mesas max\n";
+    cout << " Delays configurados: [" << cfg.min_delay_ms << " ms - " << cfg.max_delay_ms << " ms]\n";
+    cout << "=========================================================\n";
 
-    // Ejecutar una partida completa con el Juez, Puma y 12 Perros
-    TableroKomikan mesa_1(1, cfg);
-    pthread_t t_juez;
-    pthread_create(&t_juez, NULL, hilo_juez, &mesa_1);
-    pthread_join(t_juez, NULL);
+    ServidorMatchmaker servidor(N, M, cfg);
 
+    // 1. Lanzar los N hilos de clientes llegando de forma concurrente
+    vector<pthread_t> hilos_clientes(N);
+    for (int i = 0; i < N; i++) {
+        ArgCliente* arg = new ArgCliente{i + 1, &servidor};
+        pthread_create(&hilos_clientes[i], NULL, hilo_cliente, arg);
+    }
+
+    // 2. Esperar a que los N clientes hayan sido procesados en el lobby
+    for (int i = 0; i < N; i++) {
+        pthread_join(hilos_clientes[i], NULL);
+    }
+
+    // 3. Esperar a que terminen todas las partidas creadas por el Matchmaker
+    for (pthread_t t_part : servidor.hilos_partidas) {
+        pthread_join(t_part, NULL);
+    }
+
+    cout << "\n=========================================================\n";
+    cout << "               RESUMEN FINAL DEL TORNEO\n";
+    cout << "=========================================================\n";
+    cout << " - Clientes totales recibidos (N) : " << N << "\n";
+    cout << " - Mesas concurrentes maximas (M) : " << M << "\n";
+    cout << " - Partidas totales disputadas    : " << servidor.contador_partidas << "\n";
+    if (servidor.jugador_impar_sobrante != -1) {
+        cout << " - Jugador impar sin pareja       : Cliente #" << servidor.jugador_impar_sobrante
+             << " (Retirado limpiamente del lobby)\n";
+    } else {
+        cout << " - Jugador impar sin pareja       : Ninguno (Todos emparejados)\n";
+    }
+    cout << "=========================================================\n";
+    cout << "[SERVIDOR] Todas las partidas han concluido. Cerrando servidor.\n";
     return 0;
 }
