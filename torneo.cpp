@@ -11,45 +11,59 @@
 
 using namespace std;
 
-//Salto válido para que el Puma capture a un Perro
-
+// Salto válido para que el Puma capture a un Perro
 struct Salto {
     int sobre_nodo; // Casilla adyacente donde está el perro
-    int destino; // Casilla donde el Puma aterriza después del salto
+    int destino;    // Casilla donde el Puma aterriza después del salto
 };
 
-//Configuración por defecto del torneo sin necesidad de config.txt
-
+// Configuración por defecto del torneo sin necesidad de config.txt
 struct Configuracion {
     int min_delay_ms = 50;
     int max_delay_ms = 300;
     unsigned int seed = 0;
-    int pos_inicial_puma = 0; //El Puma empieza en el nodo 0
-    vector<int> pos_inicial_perros = {15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26}; //Posiciones iniciales de los perros en el tablero
+    int pos_inicial_puma = 0; // El Puma empieza en el nodo 0
+    vector<int> pos_inicial_perros = {15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26};
 };
 
-// Representa el estado compartido del tablero de 28 casillas de la mesa
-
+// Representa el estado compartido del tablero de 28 casillas de la mesa (Opción A)
 struct TableroKomikan {
-char casillas[28]; // 'P' para Puma, 'D' para Perro, ' ' para vacío
-vector<int> adyacentes[28]; //Movimientos normales de 1 paso
-vector<Salto> saltos_puma[28]; //Saltos de captura de 2 pasos
-pthread_mutex_t mutex_casilla[28]; //Mutex individual por casilla
-pthread_mutex_t mutex_tablero; //Mutex general para el tablero
+    int id_mesa;
+    char casillas[28];               // 'P' para Puma, 'D' para Perro, '.' para vacío
+    vector<int> adyacentes[28];      // Movimientos normales de 1 paso
+    vector<Salto> saltos_puma[28];   // Saltos de captura de 2 pasos
 
-TableroKomikan(const Configuracion& cfg) {
+    int pos_puma;
+    int pos_perros[12];              // Posición de cada perro (-1 si fue capturado)
+    int perros_capturados;
+    bool partida_activa;
+    bool hubo_movimiento;
+    string ultimo_evento;
+
+    Configuracion cfg;
+    pthread_mutex_t mutex_tablero;   // Mutex general para proteger el tablero
+    pthread_cond_t cond_juez;        // Variable de condición para despertar al Juez
+
+    TableroKomikan(int id, const Configuracion& config)
+        : id_mesa(id), perros_capturados(0), partida_activa(true), hubo_movimiento(false), cfg(config) {
         pthread_mutex_init(&mutex_tablero, NULL);
+        pthread_cond_init(&cond_juez, NULL);
+
         for (int i = 0; i < 28; i++) {
             casillas[i] = '.';
-            pthread_mutex_init(&mutex_casilla[i], NULL);
         }
 
         construir_geometria();
 
-        // Posicionar al Puma y a los 12 Perros según la configuración
-        casillas[cfg.pos_inicial_puma] = 'P';
-        for (int pos : cfg.pos_inicial_perros) {
-            if (pos >= 0 && pos < 28 && pos != cfg.pos_inicial_puma) {
+        // Posicionar al Puma
+        pos_puma = cfg.pos_inicial_puma;
+        casillas[pos_puma] = 'P';
+
+        // Posicionar a los 12 Perros
+        for (int i = 0; i < 12; i++) {
+            int pos = cfg.pos_inicial_perros[i];
+            pos_perros[i] = pos;
+            if (pos >= 0 && pos < 28 && pos != pos_puma) {
                 casillas[pos] = 'D';
             }
         }
@@ -57,18 +71,14 @@ TableroKomikan(const Configuracion& cfg) {
 
     ~TableroKomikan() {
         pthread_mutex_destroy(&mutex_tablero);
-        for (int i = 0; i < 28; i++) {
-            pthread_mutex_destroy(&mutex_casilla[i]);
-        }
+        pthread_cond_destroy(&cond_juez);
     }
 
-    // Agrega una arista bidireccional entre dos casillas
     void conectar(int u, int v) {
         adyacentes[u].push_back(v);
         adyacentes[v].push_back(u);
     }
 
-    // Agrega un salto de captura en ambos sentidos de una línea de 3 nodos (a -> b -> c)
     void agregar_linea_salto(int a, int b, int c) {
         saltos_puma[a].push_back({b, c});
         saltos_puma[c].push_back({b, a});
@@ -85,37 +95,45 @@ TableroKomikan(const Configuracion& cfg) {
         for (int fila = 0; fila < 5; fila++) {
             for (int col = 0; col < 5; col++) {
                 int actual = 3 + fila * 5 + col;
-                // Derecha
                 if (col < 4) conectar(actual, actual + 1);
-                // Abajo
                 if (fila < 4) conectar(actual, actual + 5);
             }
         }
 
         // 3. Saltos rectos dentro del Trono y hacia la grilla 5x5
-        agregar_linea_salto(0, 1, 3); // Diagonal izquierda del trono: T -> 1 -> 3
-        agregar_linea_salto(0, 2, 7); // Diagonal derecha del trono: T -> 2 -> 7
-        agregar_linea_salto(0, 5, 10); // Vertical central desde T: T -> 5 -> 10
-        agregar_linea_salto(1, 4, 9);  // Vertical desde nodo 1: 1 -> 4 -> 9
-        agregar_linea_salto(2, 6, 11); // Vertical desde nodo 2: 2 -> 6 -> 11
+        agregar_linea_salto(0, 1, 3);
+        agregar_linea_salto(0, 2, 7);
+        agregar_linea_salto(0, 5, 10);
+        agregar_linea_salto(1, 4, 9);
+        agregar_linea_salto(2, 6, 11);
 
         // 4. Saltos horizontales y verticales dentro de la grilla 5x5
         for (int fila = 0; fila < 5; fila++) {
             for (int col = 0; col < 5; col++) {
                 int a = 3 + fila * 5 + col;
-                // Salto horizontal (a -> a+1 -> a+2)
                 if (col <= 2) agregar_linea_salto(a, a + 1, a + 2);
-                // Salto vertical (a -> a+5 -> a+10)
                 if (fila <= 2) agregar_linea_salto(a, a + 5, a + 10);
             }
         }
     }
 
-    // Imprime el estado actual del tablero en consola
+    // Verifica si el Puma tiene al menos un movimiento o salto válido disponible
+    bool puma_tiene_movimientos() {
+        for (int vecino : adyacentes[pos_puma]) {
+            if (casillas[vecino] == '.') return true;
+        }
+        for (const Salto& s : saltos_puma[pos_puma]) {
+            if (casillas[s.sobre_nodo] == 'D' && casillas[s.destino] == '.') return true;
+        }
+        return false;
+    }
 
-    void imprimir_tablero(int id_mesa, int perros_capturados) {
+    void imprimir_tablero() {
         cout << "\n========== MESA " << id_mesa << " | Perros capturados: "
              << perros_capturados << "/6 ==========\n";
+        if (!ultimo_evento.empty()) {
+            cout << "Evento: " << ultimo_evento << "\n";
+        }
         cout << "                (" << casillas[0] << ") [T:0]\n";
         cout << "              /  |  \\\n";
         cout << "        [1](" << casillas[1] << ")---+---(" << casillas[2] << ")[2]\n";
@@ -130,15 +148,189 @@ TableroKomikan(const Configuracion& cfg) {
             }
             cout << "\n";
             if (fila < 4) {
-                cout << "         |     |     |     |     |\n";
+                cout << "         |   |   |   |   |\n";
             }
         }
         cout << "====================================================\n";
     }
 };
 
-// Función para leer config.txt y cargar la configuración del torneo
+// Argumentos para pasar a cada hilo de Perro
+struct ArgPerro {
+    int id_perro;
+    TableroKomikan* mesa;
+};
 
+// Función auxiliar para dormir entre min_delay_ms y max_delay_ms de forma thread-safe
+void dormir_aleatorio(const Configuracion& cfg, unsigned int* seed_hilo) {
+    int rango = cfg.max_delay_ms - cfg.min_delay_ms + 1;
+    int ms = cfg.min_delay_ms + (rand_r(seed_hilo) % (rango > 0 ? rango : 1));
+    usleep(ms * 1000);
+}
+
+// Hilo del Puma (1 por mesa)
+void* hilo_puma(void* arg) {
+    TableroKomikan* mesa = static_cast<TableroKomikan*>(arg);
+    unsigned int seed_local = mesa->cfg.seed ^ 999;
+
+    while (true) {
+        dormir_aleatorio(mesa->cfg, &seed_local);
+
+        pthread_mutex_lock(&mesa->mutex_tablero);
+        if (!mesa->partida_activa) {
+            pthread_mutex_unlock(&mesa->mutex_tablero);
+            break;
+        }
+
+        int origen = mesa->pos_puma;
+        vector<Salto> capturas_posibles;
+        for (const Salto& s : mesa->saltos_puma[origen]) {
+            if (mesa->casillas[s.sobre_nodo] == 'D' && mesa->casillas[s.destino] == '.') {
+                capturas_posibles.push_back(s);
+            }
+        }
+
+        // Prioridad 1: Si puede capturar a un perro, salta
+        if (!capturas_posibles.empty()) {
+            Salto elegido = capturas_posibles[rand_r(&seed_local) % capturas_posibles.size()];
+            mesa->casillas[origen] = '.';
+            mesa->casillas[elegido.sobre_nodo] = '.';
+            mesa->casillas[elegido.destino] = 'P';
+            mesa->pos_puma = elegido.destino;
+
+            // Marcar al perro capturado como eliminado (-1)
+            for (int i = 0; i < 12; i++) {
+                if (mesa->pos_perros[i] == elegido.sobre_nodo) {
+                    mesa->pos_perros[i] = -1;
+                    break;
+                }
+            }
+            mesa->perros_capturados++;
+            mesa->ultimo_evento = "Puma salta de " + to_string(origen) + " a " +
+                                  to_string(elegido.destino) + " capturando perro en " +
+                                  to_string(elegido.sobre_nodo) + "!";
+            mesa->hubo_movimiento = true;
+            pthread_cond_signal(&mesa->cond_juez);
+        } else {
+            // Prioridad 2: Movimiento normal a una casilla vecina libre
+            vector<int> libres;
+            for (int v : mesa->adyacentes[origen]) {
+                if (mesa->casillas[v] == '.') libres.push_back(v);
+            }
+            if (!libres.empty()) {
+                int destino = libres[rand_r(&seed_local) % libres.size()];
+                mesa->casillas[origen] = '.';
+                mesa->casillas[destino] = 'P';
+                mesa->pos_puma = destino;
+                mesa->ultimo_evento = "Puma se mueve de " + to_string(origen) + " a " + to_string(destino);
+                mesa->hubo_movimiento = true;
+                pthread_cond_signal(&mesa->cond_juez);
+            }
+        }
+
+        pthread_mutex_unlock(&mesa->mutex_tablero);
+    }
+    return NULL;
+}
+
+// Hilo de cada Perro (12 por mesa)
+void* hilo_perro(void* arg) {
+    ArgPerro* datos = static_cast<ArgPerro*>(arg);
+    int id = datos->id_perro;
+    TableroKomikan* mesa = datos->mesa;
+    unsigned int seed_local = mesa->cfg.seed ^ (id + 100);
+
+    while (true) {
+        dormir_aleatorio(mesa->cfg, &seed_local);
+
+        pthread_mutex_lock(&mesa->mutex_tablero);
+        // Si la partida terminó o este perro fue capturado por el Puma, el hilo termina
+        if (!mesa->partida_activa || mesa->pos_perros[id] == -1) {
+            pthread_mutex_unlock(&mesa->mutex_tablero);
+            break;
+        }
+
+        int origen = mesa->pos_perros[id];
+        vector<int> libres;
+        for (int v : mesa->adyacentes[origen]) {
+            if (mesa->casillas[v] == '.') libres.push_back(v);
+        }
+
+        if (!libres.empty()) {
+            int destino = libres[rand_r(&seed_local) % libres.size()];
+            mesa->casillas[origen] = '.';
+            mesa->casillas[destino] = 'D';
+            mesa->pos_perros[id] = destino;
+            mesa->ultimo_evento = "Perro #" + to_string(id) + " se mueve de " +
+                                  to_string(origen) + " a " + to_string(destino);
+            mesa->hubo_movimiento = true;
+            pthread_cond_signal(&mesa->cond_juez);
+        }
+
+        pthread_mutex_unlock(&mesa->mutex_tablero);
+    }
+    return NULL;
+}
+
+// Hilo Juez Árbitro de la Mesa
+void* hilo_juez(void* arg) {
+    TableroKomikan* mesa = static_cast<TableroKomikan*>(arg);
+
+    pthread_mutex_lock(&mesa->mutex_tablero);
+    mesa->ultimo_evento = "Partida iniciada por el Juez";
+    mesa->imprimir_tablero();
+    pthread_mutex_unlock(&mesa->mutex_tablero);
+
+    // Crear el hilo del Puma y los 12 hilos de los Perros
+    pthread_t t_puma;
+    pthread_t t_perros[12];
+    ArgPerro args_perros[12];
+
+    pthread_create(&t_puma, NULL, hilo_puma, mesa);
+    for (int i = 0; i < 12; i++) {
+        args_perros[i] = {i, mesa};
+        pthread_create(&t_perros[i], NULL, hilo_perro, &args_perros[i]);
+    }
+
+    // Ciclo de supervisión del Juez
+    pthread_mutex_lock(&mesa->mutex_tablero);
+    while (mesa->partida_activa) {
+        while (!mesa->hubo_movimiento && mesa->partida_activa) {
+            pthread_cond_wait(&mesa->cond_juez, &mesa->mutex_tablero);
+        }
+        if (!mesa->partida_activa) break;
+
+        mesa->hubo_movimiento = false;
+        mesa->imprimir_tablero();
+
+        // Condición de victoria 1: El Puma capturó 6 o más perros
+        if (mesa->perros_capturados >= 6) {
+            cout << "\n>>> [JUEZ MESA " << mesa->id_mesa << "] ¡VICTORIA DEL PUMA! (Capturo "
+                 << mesa->perros_capturados << " perros) <<<\n";
+            mesa->partida_activa = false;
+            break;
+        }
+
+        // Condición de victoria 2: Los Perros acorralaron al Puma
+        if (!mesa->puma_tiene_movimientos()) {
+            cout << "\n>>> [JUEZ MESA " << mesa->id_mesa << "] ¡VICTORIA DE LOS PERROS! (Puma acorralado en nodo "
+                 << mesa->pos_puma << ") <<<\n";
+            mesa->partida_activa = false;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&mesa->mutex_tablero);
+
+    // Esperar a que todos los hilos de fichas terminen limpiamente
+    pthread_join(t_puma, NULL);
+    for (int i = 0; i < 12; i++) {
+        pthread_join(t_perros[i], NULL);
+    }
+
+    return NULL;
+}
+
+// Función para leer config.txt y cargar la configuración del torneo
 Configuracion cargar_configuracion(const string& ruta) {
     Configuracion cfg;
     cfg.seed = static_cast<unsigned int>(time(NULL));
@@ -174,8 +366,7 @@ Configuracion cargar_configuracion(const string& ruta) {
         }
     }
     return cfg;
-};
-
+}
 
 int main(int argc, char* argv[]) {
     if (argc < 3 || argc > 4) {
@@ -193,14 +384,15 @@ int main(int argc, char* argv[]) {
     }
 
     Configuracion cfg = cargar_configuracion(ruta_cfg);
-    srand(cfg.seed);
 
     cout << "Torneo Komikan Inicializado | N=" << N << " jugadores | M=" << M << " mesas max\n";
     cout << "Delays configurados: [" << cfg.min_delay_ms << " ms - " << cfg.max_delay_ms << " ms]\n";
 
-    // Prueba visual de la Etapa 1: crear un tablero y mostrarlo
-    TableroKomikan tablero_prueba(cfg);
-    tablero_prueba.imprimir_tablero(1, 0);
+    // Prueba de la Etapa 2: Ejecutar una partida completa con el Juez, Puma y 12 Perros
+    TableroKomikan mesa_1(1, cfg);
+    pthread_t t_juez;
+    pthread_create(&t_juez, NULL, hilo_juez, &mesa_1);
+    pthread_join(t_juez, NULL);
 
     return 0;
-};
+}
