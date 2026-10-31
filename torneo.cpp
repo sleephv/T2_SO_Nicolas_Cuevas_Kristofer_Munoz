@@ -15,7 +15,7 @@ using namespace std;
 
 struct Salto {
     int sobre_nodo; // Casilla adyacente donde está el perro
-    int destino nodo; // Casilla donde el Puma aterriza después del salto
+    int destino; // Casilla donde el Puma aterriza después del salto
 };
 
 //Configuración por defecto del torneo sin necesidad de config.txt
@@ -34,8 +34,9 @@ struct TableroKomikan {
 char casillas[28]; // 'P' para Puma, 'D' para Perro, ' ' para vacío
 vector<int> adyacentes[28]; //Movimientos normales de 1 paso
 vector<Salto> saltos_puma[28]; //Saltos de captura de 2 pasos
-phtread_mutex_t mutex_casilla[28]; //Mutex individual por casilla
+pthread_mutex_t mutex_casilla[28]; //Mutex individual por casilla
 pthread_mutex_t mutex_tablero; //Mutex general para el tablero
+
 TableroKomikan(const Configuracion& cfg) {
         pthread_mutex_init(&mutex_tablero, NULL);
         for (int i = 0; i < 28; i++) {
@@ -109,9 +110,71 @@ TableroKomikan(const Configuracion& cfg) {
             }
         }
     }
+
+    // Imprime el estado actual del tablero en consola
+
+    void imprimir_tablero(int id_mesa, int perros_capturados) {
+        cout << "\n========== MESA " << id_mesa << " | Perros capturados: "
+             << perros_capturados << "/6 ==========\n";
+        cout << "                (" << casillas[0] << ") [T:0]\n";
+        cout << "              /  |  \\\n";
+        cout << "        [1](" << casillas[1] << ")---+---(" << casillas[2] << ")[2]\n";
+        cout << "          / |    |    | \\\n";
+
+        for (int fila = 0; fila < 5; fila++) {
+            cout << "        ";
+            for (int col = 0; col < 5; col++) {
+                int idx = 3 + fila * 5 + col;
+                cout << "(" << casillas[idx] << ")";
+                if (col < 4) cout << "---";
+            }
+            cout << "\n";
+            if (fila < 4) {
+                cout << "         |     |     |     |     |\n";
+            }
+        }
+        cout << "====================================================\n";
+    }
 };
 
+// Función para leer config.txt y cargar la configuración del torneo
 
+Configuracion cargar_configuracion(const string& ruta) {
+    Configuracion cfg;
+    cfg.seed = static_cast<unsigned int>(time(NULL));
+
+    if (ruta.empty()) return cfg;
+
+    ifstream archivo(ruta);
+    if (!archivo.is_open()) {
+        cerr << "Aviso: No se pudo abrir " << ruta << ". Usando valores por defecto.\n";
+        return cfg;
+    }
+
+    string linea;
+    while (getline(archivo, linea)) {
+        if (linea.empty() || linea[0] == '#') continue;
+        stringstream ss(linea);
+        string clave;
+        if (getline(ss, clave, '=')) {
+            string valor;
+            getline(ss, valor);
+            if (clave == "min_delay") cfg.min_delay_ms = stoi(valor);
+            else if (clave == "max_delay") cfg.max_delay_ms = stoi(valor);
+            else if (clave == "seed") cfg.seed = static_cast<unsigned int>(stoul(valor));
+            else if (clave == "puma") cfg.pos_inicial_puma = stoi(valor);
+            else if (clave == "perros") {
+                cfg.pos_inicial_perros.clear();
+                stringstream ss_perros(valor);
+                string pos_str;
+                while (getline(ss_perros, pos_str, ',')) {
+                    cfg.pos_inicial_perros.push_back(stoi(pos_str));
+                }
+            }
+        }
+    }
+    return cfg;
+};
 
 
 int main(int argc, char* argv[]) {
@@ -120,15 +183,24 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    int N_jugadores = stoi(argv[1]);
-    int M_mesas = stoi(argv[2]);
-    
-    if (N_jugadores <= 0 || M_mesas <= 0) {
+    int N = stoi(argv[1]);
+    int M = stoi(argv[2]);
+    string ruta_cfg = (argc == 4) ? argv[3] : "";
+
+    if (N <= 0 || M <= 0) {
         cerr << "Error: N y M deben ser mayores a 0.\n";
         return 1;
     }
 
-    cout << "Torneo Komikan Inicializado | Jugadores: " << N_jugadores << " | Mesas: " << M_mesas << "\n";
+    Configuracion cfg = cargar_configuracion(ruta_cfg);
+    srand(cfg.seed);
+
+    cout << "Torneo Komikan Inicializado | N=" << N << " jugadores | M=" << M << " mesas max\n";
+    cout << "Delays configurados: [" << cfg.min_delay_ms << " ms - " << cfg.max_delay_ms << " ms]\n";
+
+    // Prueba visual de la Etapa 1: crear un tablero y mostrarlo
+    TableroKomikan tablero_prueba(cfg);
+    tablero_prueba.imprimir_tablero(1, 0);
 
     return 0;
-}
+};
