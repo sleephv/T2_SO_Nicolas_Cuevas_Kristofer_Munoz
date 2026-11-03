@@ -16,21 +16,25 @@
 using namespace std;
 
 // Bandera atómica global para capturar la señal SIGINT (Ctrl+C)
+
 volatile sig_atomic_t sigint_recibido = 0;
 
 // Manejador asíncrono-seguro para la señal SIGINT
+
 void manejador_sigint(int sig) {
     (void)sig;
     sigint_recibido = 1;
 }
 
 // Salto válido para que el Puma capture a un Perro
+
 struct Salto {
     int sobre_nodo; // Casilla adyacente donde está el perro
     int destino;    // Casilla donde el Puma aterriza después del salto
 };
 
 // Configuración por defecto del torneo o cargada desde config.txt
+
 struct Configuracion {
     int min_delay_ms = 50;
     int max_delay_ms = 300;
@@ -42,6 +46,7 @@ struct Configuracion {
 };
 
 // Representa el estado compartido del tablero de 28 casillas de la mesa (Patrón Monitor)
+
 struct TableroKomikan {
     int id_mesa;
     int id_jugador_puma;
@@ -58,6 +63,7 @@ struct TableroKomikan {
     bool hubo_movimiento;
 
     // Variables de Resiliencia (Etapa 4)
+
     bool anomalia_detectada;
     char bando_fallido;              // 'P' si falló el Puma, 'D' si falló el jugador Perros
     string motivo_fallo;
@@ -87,6 +93,7 @@ struct TableroKomikan {
         construir_geometria();
 
         // Posicionar al Puma
+            
         pos_puma = cfg.pos_inicial_puma;
         if (pos_puma >= 0 && pos_puma < 28) {
             casillas[pos_puma] = 'P';
@@ -96,6 +103,7 @@ struct TableroKomikan {
         }
 
         // Posicionar a los 12 Perros
+            
         for (int i = 0; i < 12; i++) {
             int pos = (i < static_cast<int>(cfg.pos_inicial_perros.size())) ? cfg.pos_inicial_perros[i] : -1;
             if (pos >= 0 && pos < 28 && pos != pos_puma && casillas[pos] == '.') {
@@ -123,13 +131,16 @@ struct TableroKomikan {
     }
 
     void construir_geometria() {
+        
         // 1. Conexiones del Trono (Nodos 0, 1, 2) acoplados a la Fila 0 (Nodos 3..7)
+        
         conectar(0, 1); conectar(0, 5); conectar(0, 2);
         conectar(1, 2);
         conectar(1, 3); conectar(1, 4);
         conectar(2, 6); conectar(2, 7);
 
         // 2. Conexiones de la cuadrícula principal 5x5 (Nodos 3 al 27)
+        
         for (int fila = 0; fila < 5; fila++) {
             for (int col = 0; col < 5; col++) {
                 int actual = 3 + fila * 5 + col;
@@ -139,6 +150,7 @@ struct TableroKomikan {
         }
 
         // 3. Saltos rectos dentro del Trono y hacia la grilla 5x5
+        
         agregar_linea_salto(0, 1, 3);  // Diagonal izquierda del trono: 0 <-> 1 <-> 3
         agregar_linea_salto(0, 2, 7);  // Diagonal derecha del trono: 0 <-> 2 <-> 7
         agregar_linea_salto(0, 5, 10); // Vertical central desde T: 0 <-> 5 <-> 10
@@ -146,6 +158,7 @@ struct TableroKomikan {
         agregar_linea_salto(2, 6, 11); // Vertical desde nodo 2: 2 <-> 6 <-> 11
 
         // 4. Saltos horizontales y verticales dentro de la grilla 5x5
+        
         for (int fila = 0; fila < 5; fila++) {
             for (int col = 0; col < 5; col++) {
                 int a = 3 + fila * 5 + col;
@@ -156,6 +169,7 @@ struct TableroKomikan {
     }
 
     // Verifica si el Puma tiene al menos un movimiento o salto válido disponible
+
     bool puma_tiene_movimientos() {
         for (int vecino : adyacentes[pos_puma]) {
             if (casillas[vecino] == '.') return true;
@@ -167,6 +181,7 @@ struct TableroKomikan {
     }
 
     // Imprime el tablero perfectamente alineado en consola y en el archivo de log
+
     void imprimir_tablero() {
         if (mutex_consola) pthread_mutex_lock(mutex_consola);
 
@@ -209,6 +224,7 @@ struct TableroKomikan {
 };
 
 // Estructura para liberar automáticamente el mutex_tablero si un hilo aborta (Sección 4.1)
+
 struct ContextoLimpiezaMutex {
     TableroKomikan* mesa;
     bool bloqueado;
@@ -224,12 +240,14 @@ void liberar_mutex_en_fallo(void* arg) {
 }
 
 // Argumentos para pasar a cada hilo de Perro
+
 struct ArgPerro {
     int id_perro;
     TableroKomikan* mesa;
 };
 
 // Función auxiliar para dormir entre min_delay_ms y max_delay_ms de forma thread-safe
+
 void dormir_aleatorio(const Configuracion& cfg, unsigned int* seed_hilo) {
     if (sigint_recibido) return;
     int rango = cfg.max_delay_ms - cfg.min_delay_ms + 1;
@@ -238,6 +256,7 @@ void dormir_aleatorio(const Configuracion& cfg, unsigned int* seed_hilo) {
 }
 
 // Hilo del Puma (1 por mesa)
+
 void* hilo_puma(void* arg) {
     TableroKomikan* mesa = static_cast<TableroKomikan*>(arg);
     unsigned int seed_local = mesa->cfg.seed ^ (999 + mesa->id_mesa * 31);
@@ -258,6 +277,7 @@ void* hilo_puma(void* arg) {
         }
 
         // Simulación de desconexión o fallo interno del jugador Puma (Sección 4.1)
+        
         if (mesa->cfg.prob_fallo_por_mil > 0 &&
             (rand_r(&seed_local) % 1000) < mesa->cfg.prob_fallo_por_mil) {
             mesa->anomalia_detectada = true;
@@ -265,7 +285,9 @@ void* hilo_puma(void* arg) {
             mesa->motivo_fallo = "Desconexion/fallo interno detectado en el Jugador Puma (#" +
                                  to_string(mesa->id_jugador_puma) + ")";
             mesa->hubo_movimiento = true;
+            
             // Salir ejecutando el manejador de limpieza que desbloquea el mutex y avisa al Juez
+            
             pthread_exit(NULL);
         }
 
@@ -278,6 +300,7 @@ void* hilo_puma(void* arg) {
         }
 
         // Prioridad 1: Si puede capturar a un perro, salta
+        
         if (!capturas_posibles.empty()) {
             Salto elegido = capturas_posibles[rand_r(&seed_local) % capturas_posibles.size()];
             mesa->casillas[origen] = '.';
@@ -286,6 +309,7 @@ void* hilo_puma(void* arg) {
             mesa->pos_puma = elegido.destino;
 
             // Marcar al perro capturado como eliminado (-1)
+            
             for (int i = 0; i < 12; i++) {
                 if (mesa->pos_perros[i] == elegido.sobre_nodo) {
                     mesa->pos_perros[i] = -1;
@@ -299,7 +323,9 @@ void* hilo_puma(void* arg) {
             mesa->hubo_movimiento = true;
             pthread_cond_signal(&mesa->cond_juez);
         } else {
+            
             // Prioridad 2: Movimiento normal a una casilla vecina libre
+            
             vector<int> libres;
             for (int v : mesa->adyacentes[origen]) {
                 if (mesa->casillas[v] == '.') libres.push_back(v);
@@ -324,6 +350,7 @@ void* hilo_puma(void* arg) {
 }
 
 // Hilo de cada Perro (12 por mesa)
+
 void* hilo_perro(void* arg) {
     ArgPerro* datos = static_cast<ArgPerro*>(arg);
     int id = datos->id_perro;
@@ -340,6 +367,7 @@ void* hilo_perro(void* arg) {
         ctx.bloqueado = true;
 
         // Si la partida terminó o este perro fue capturado por el Puma, el hilo termina
+        
         if (!mesa->partida_activa || mesa->pos_perros[id] == -1 || sigint_recibido) {
             ctx.bloqueado = false;
             pthread_mutex_unlock(&mesa->mutex_tablero);
@@ -347,6 +375,7 @@ void* hilo_perro(void* arg) {
         }
 
         // Simulación de fallo interno / desconexión en el bando de los Perros (Sección 4.1)
+        
         if (id == 0 && mesa->cfg.prob_fallo_por_mil > 0 &&
             (rand_r(&seed_local) % 1000) < mesa->cfg.prob_fallo_por_mil) {
             mesa->anomalia_detectada = true;
@@ -383,6 +412,7 @@ void* hilo_perro(void* arg) {
 }
 
 // Hilo Juez Árbitro de la Mesa
+
 void* hilo_juez(void* arg) {
     TableroKomikan* mesa = static_cast<TableroKomikan*>(arg);
 
@@ -392,6 +422,7 @@ void* hilo_juez(void* arg) {
     pthread_mutex_unlock(&mesa->mutex_tablero);
 
     // Crear el hilo del Puma y los 12 hilos de los Perros
+    
     pthread_t t_puma;
     pthread_t t_perros[12];
     ArgPerro args_perros[12];
@@ -403,6 +434,7 @@ void* hilo_juez(void* arg) {
     }
 
     // Ciclo de supervisión pasiva del Juez
+    
     pthread_mutex_lock(&mesa->mutex_tablero);
     while (mesa->partida_activa) {
         while (!mesa->hubo_movimiento && mesa->partida_activa &&
@@ -411,6 +443,7 @@ void* hilo_juez(void* arg) {
         }
 
         // Caso 4.2: Interrupción global del Servidor (SIGINT / Ctrl+C)
+        
         if (sigint_recibido || mesa->cancelada_por_sigint) {
             mesa->partida_activa = false;
             if (mesa->mutex_consola) pthread_mutex_lock(mesa->mutex_consola);
@@ -425,6 +458,7 @@ void* hilo_juez(void* arg) {
         }
 
         // Caso 4.1: Detección de desconexión o fallo interno de un jugador
+        
         if (mesa->anomalia_detectada) {
             mesa->partida_activa = false;
             int ganador = (mesa->bando_fallido == 'P') ? mesa->id_jugador_perros : mesa->id_jugador_puma;
@@ -451,6 +485,7 @@ void* hilo_juez(void* arg) {
         mesa->imprimir_tablero();
 
         // Condición de victoria 1: El Puma capturó 6 o más perros
+        
         if (mesa->perros_capturados >= 6) {
             if (mesa->mutex_consola) pthread_mutex_lock(mesa->mutex_consola);
             string msg = "\n>>> [JUEZ MESA " + to_string(mesa->id_mesa) +
@@ -464,6 +499,7 @@ void* hilo_juez(void* arg) {
         }
 
         // Condición de victoria 2: Los Perros acorralaron al Puma
+        
         if (!mesa->puma_tiene_movimientos()) {
             if (mesa->mutex_consola) pthread_mutex_lock(mesa->mutex_consola);
             string msg = "\n>>> [JUEZ MESA " + to_string(mesa->id_mesa) +
@@ -479,6 +515,7 @@ void* hilo_juez(void* arg) {
     pthread_mutex_unlock(&mesa->mutex_tablero);
 
     // Esperar a que todos los hilos de fichas terminen limpiamente
+    
     pthread_join(t_puma, NULL);
     for (int i = 0; i < 12; i++) {
         pthread_join(t_perros[i], NULL);
@@ -568,15 +605,19 @@ struct ServidorMatchmaker {
     }
 
     // Notifica a todas las partidas activas y clientes en espera que el servidor se apaga por SIGINT
+
     void notificar_cierre_emergencia() {
         pthread_mutex_lock(&mutex_mm);
+        
         // Vaciar la cola de espera para que ningún cliente quede bloqueado
+        
         while (!cola_espera.empty()) {
             cola_espera.pop();
         }
         pthread_cond_broadcast(&cond_lobby);
 
         // Notificar a cada mesa activa que debe terminar ordenadamente
+        
         for (TableroKomikan* mesa : mesas_en_curso) {
             if (mesa) {
                 pthread_mutex_lock(&mesa->mutex_tablero);
@@ -598,6 +639,7 @@ struct DatosPartida {
 };
 
 // Hilo vigía que monitorea la bandera sigint_recibido para despertar inmediatamente a todas las mesas
+
 void* hilo_vigia_sigint(void* arg) {
     ServidorMatchmaker* srv = static_cast<ServidorMatchmaker*>(arg);
     while (!sigint_recibido) {
@@ -619,7 +661,9 @@ void* hilo_vigia_sigint(void* arg) {
         pthread_mutex_unlock(&srv->mutex_consola);
 
         srv->notificar_cierre_emergencia();
+        
         // Despertar posibles hilos esperando cupo en el semáforo de mesas
+        
         for (size_t i = 0; i < srv->mesa_libre.size() + 2; i++) {
             sem_post(&srv->sem_mesas_disponibles);
         }
@@ -628,11 +672,13 @@ void* hilo_vigia_sigint(void* arg) {
 }
 
 // Hilo que gestiona el ciclo de vida de una Mesa asignada
+
 void* ejecutar_mesa_torneo(void* arg) {
     DatosPartida* datos = static_cast<DatosPartida*>(arg);
     ServidorMatchmaker* srv = datos->servidor;
 
     // 1. Espera pasiva en el semáforo si las M mesas están ocupadas
+    
     while (sem_wait(&srv->sem_mesas_disponibles) == -1) {
         if (errno == EINTR && sigint_recibido) {
             delete datos;
@@ -647,6 +693,7 @@ void* ejecutar_mesa_torneo(void* arg) {
     }
 
     // 2. Reclamar el número de mesa física disponible (entre 1 y M)
+    
     int id_mesa_fisica = -1;
     pthread_mutex_lock(&srv->mutex_mm);
     for (size_t i = 0; i < srv->mesa_libre.size(); i++) {
@@ -671,6 +718,7 @@ void* ejecutar_mesa_torneo(void* arg) {
     pthread_mutex_unlock(&srv->mutex_consola);
 
     // 3. Crear el tablero de la mesa, registrarlo para SIGINT y correr el Juez Árbitro
+    
     TableroKomikan mesa(id_mesa_fisica, datos->id_jugador_puma, datos->id_jugador_perros,
                         srv->cfg, &srv->mutex_consola, &srv->archivo_log);
 
@@ -681,6 +729,7 @@ void* ejecutar_mesa_torneo(void* arg) {
     hilo_juez(&mesa);
 
     // 4. Desregistrar la mesa activa y liberar el cupo físico
+    
     pthread_mutex_lock(&srv->mutex_mm);
     srv->mesas_en_curso.erase(
         remove(srv->mesas_en_curso.begin(), srv->mesas_en_curso.end(), &mesa),
@@ -706,6 +755,7 @@ struct ArgCliente {
 };
 
 // Hilo que representa a cada uno de los N clientes llegando concurrentemente al servidor
+
 void* hilo_cliente(void* arg) {
     ArgCliente* cli = static_cast<ArgCliente*>(arg);
     ServidorMatchmaker* srv = cli->servidor;
@@ -713,6 +763,7 @@ void* hilo_cliente(void* arg) {
     pthread_mutex_lock(&srv->mutex_mm);
 
     // Si se recibió SIGINT, detener inmediatamente la llegada de nuevos jugadores (Sección 4.2.1)
+    
     if (sigint_recibido) {
         srv->clientes_llegados++;
         pthread_cond_broadcast(&srv->cond_lobby);
@@ -730,6 +781,7 @@ void* hilo_cliente(void* arg) {
     pthread_mutex_unlock(&srv->mutex_consola);
 
     // Caso 1: Hay 2 jugadores en la fila -> Se emparejan y despiertan al compañero que esperaba
+    
     if (srv->cola_espera.size() >= 2) {
         int jug_puma = srv->cola_espera.front();
         srv->cola_espera.pop();
@@ -750,7 +802,9 @@ void* hilo_cliente(void* arg) {
 
         pthread_cond_broadcast(&srv->cond_lobby);
     }
+        
     // Caso 2: Quedó 1 solo jugador en la cola -> Espera pasivamente hasta que llegue pareja, se acaben los N clientes o llegue SIGINT
+        
     else {
         while (!sigint_recibido &&
                !srv->cola_espera.empty() &&
@@ -800,6 +854,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Registrar manejador de señal SIGINT (Ctrl+C)
+    
     struct sigaction sa;
     sa.sa_handler = manejador_sigint;
     sigemptyset(&sa.sa_mask);
@@ -817,10 +872,12 @@ int main(int argc, char* argv[]) {
     ServidorMatchmaker servidor(N, M, cfg);
 
     // 1. Lanzar hilo vigía desde el inicio para atender Ctrl+C en cualquier etapa
+    
     pthread_t t_vigia;
     pthread_create(&t_vigia, NULL, hilo_vigia_sigint, &servidor);
 
     // 2. Lanzar los N hilos de clientes llegando de forma concurrente
+    
     vector<pthread_t> hilos_clientes(N);
     for (int i = 0; i < N; i++) {
         ArgCliente* arg = new ArgCliente{i + 1, &servidor};
@@ -828,11 +885,13 @@ int main(int argc, char* argv[]) {
     }
 
     // 3. Esperar a que los N clientes hayan sido procesados en el lobby
+    
     for (int i = 0; i < N; i++) {
         pthread_join(hilos_clientes[i], NULL);
     }
 
     // 4. Copiar los identificadores de hilos de partidas creadas para esperar su término
+    
     pthread_mutex_lock(&servidor.mutex_mm);
     vector<pthread_t> partidas_a_esperar = servidor.hilos_partidas;
     pthread_mutex_unlock(&servidor.mutex_mm);
@@ -842,6 +901,7 @@ int main(int argc, char* argv[]) {
     }
 
     // 5. Indicar al vigía que el torneo concluyó normalmente (sin tocar sigint_recibido) y unir su hilo
+    
     pthread_mutex_lock(&servidor.mutex_mm);
     servidor.cierre_normal = true;
     pthread_mutex_unlock(&servidor.mutex_mm);
